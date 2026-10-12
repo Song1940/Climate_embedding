@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# [2026-10-12 변경 내역]
+# - 현재 논문 결과는 공간 hold-out이 없으므로 patch_layout.npz를 요구하지 않음.
+# - 이전 결과 폴더는 기존 방식대로 학습/검증 패치 정보를 읽어 복원·평가함.
 """
 Step 1 디코더: step1 임베딩 [day, grid, embed_dim] → 정규화 값 [grid, 6035] →
 물리 단위로 복원하고 변수별 R²를 측정합니다.
@@ -119,8 +122,14 @@ def main():
     embeddings = np.load(embeddings_path, mmap_mode="r")
     if embeddings.shape[:2] != raw_cache.shape[:2]:
         raise ValueError(f"embeddings {embeddings.shape} do not match cache {raw_cache.shape}")
-    layout = load_patch_layout(args.step1_dir / "patch_layout.npz")
-    validation_cells = holdout_cells(layout)
+    # [2026-10-12 변경 시작: 새 결과 폴더 호환]
+    # clear_paper_run.json이 있으면 검증 격자 분할 없이 전수 복원함.
+    if (args.step1_dir / "clear_paper_run.json").exists():
+        validation_cells = None
+    else:
+        layout = load_patch_layout(args.step1_dir / "patch_layout.npz")
+        validation_cells = holdout_cells(layout)
+    # [2026-10-12 변경 끝: 새 결과 폴더 호환]
 
     count = embeddings.shape[0] if args.days is None else min(args.days, embeddings.shape[0])
     data_dir = Path(checkpoint["arguments"]["data_dir"])

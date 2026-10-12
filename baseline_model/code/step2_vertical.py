@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [2026-10-12 변경 내역]
+# - 파일명/원본 함수는 유지하고, 기본 실행을 현재 논문의 공간 ViT 학습에 연결함.
+# - 임베딩 보조 MSE 대신 고정 V 디코더를 거친 원본 변수 MSE 100%를 사용함.
+# - 앞 단계 V는 고정 재사용하며, 공통 확인 표본/조기 종료 정책을 적용함.
 """
 Step 2: 공간 지역성을 이용한 압축 (큐브스피어 CNN 또는 ViT).
 
@@ -369,5 +373,20 @@ def main():
     print(f"[done] {out / 'summary.json'}", flush=True)
 
 
+# [2026-10-12 변경 시작: 공간 학습 진입점]
+# 원래 함수는 legacy_main으로 보존. 기본 경로는 전역 ViT와 원본 변수 복원 손실임.
+legacy_main = main
+
+
+def main():
+    import sys
+    if "--legacy-training" in sys.argv:
+        sys.argv.remove("--legacy-training")
+        return legacy_main()
+    from paper_entry import run_stage
+    return run_stage("S")
+
+
 if __name__ == "__main__":
     main()
+# [2026-10-12 변경 끝: 공간 학습 진입점]

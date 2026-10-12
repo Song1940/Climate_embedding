@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [2026-10-12 변경 내역]
+# - 파일명과 기존 학습 함수는 유지하고, 기본 실행을 현재 논문 학습 정책에 연결함.
+# - SE 속성 모델을 학습하며 고정 8일x64격자 확인 표본/상대 개선 조기 종료를 사용함.
+# - 원래 학습 함수는 legacy_main으로 보존함(README_SE_UPDATE_KO.md 참고).
 """
 Step 1: 격자 셀별 1D 압축 (변수·연직 축).
 
@@ -308,5 +312,21 @@ def main():
     print(f"[done] {out / 'summary.json'}", flush=True)
 
 
+# [2026-10-12 변경 시작: 기본 학습 진입점]
+# 위 원본 함수는 비교용으로 보존하고, 기본 실행은 paper_entry의 V 단계로 연결함.
+# --legacy-training을 명시할 때만 원래 학습 정책으로 실행함.
+legacy_main = main
+
+
+def main():
+    import sys
+    if "--legacy-training" in sys.argv:
+        sys.argv.remove("--legacy-training")
+        return legacy_main()
+    from paper_entry import run_stage
+    return run_stage("V")
+
+
 if __name__ == "__main__":
     main()
+# [2026-10-12 변경 끝: 기본 학습 진입점]

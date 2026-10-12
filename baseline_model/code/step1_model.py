@@ -1,3 +1,7 @@
+# [2026-10-12 변경 내역]
+# - Step1Codec에 SE 방식 변수 게이트를 추가함(기본 활성화).
+# - 변수 토큰에 게이트를 곱한 뒤 기존 변수 임베딩/Attention으로 전달함.
+# - 디코더는 변경하지 않으며, SE 없는 이전 체크포인트도 로딩 가능하게 함.
 """
 Step 1 모델: 격자 셀 하나의 1D 벡터(181개 변수, 연직층 포함 6,035개 값)를
 임베딩 하나로 압축하는 코덱입니다. 공간·시간 정보는 전혀 쓰지 않고 셀마다
@@ -143,12 +147,14 @@ class Step1Codec(nn.Module):
         variable_slots: int = 4,
         heads: int = 4,
         dropout: float = 0.1,
+        se_gate: bool = True,  # [2026-10-12 추가] SE 변수 게이트 활성화 옵션.
     ):
         super().__init__()
         self.config = {
             "widths": [int(w) for w in widths], "token_dim": int(token_dim),
             "embed_dim": int(embed_dim), "variable_slots": int(variable_slots),
             "heads": int(heads), "dropout": float(dropout),
+            "se_gate": bool(se_gate),  # [2026-10-12 추가] 체크포인트에 SE 사용 여부 저장.
         }
         self.widths = tuple(int(w) for w in widths)
         offsets = [0]
@@ -192,22 +198,59 @@ class Step1Codec(nn.Module):
             nn.LayerNorm(embed_dim),
         )
 
+        # [2026-10-12 추가 시작: SE 게이트 생성]
+        # MLP A -> max(4, A//8) -> A로 변수별 계수를 계산함(181변수: 181->22->181).
+        # 마지막 weight/bias=0으로 초기화하여 2*sigmoid(0)=1인 항등 게이트로 시작함.
+        # RNG를 분리하여 기존 모델 초기화와 이후 dropout 난수 순서를 유지함.
+        self.se_gate = bool(se_gate)
+        if self.se_gate:
+            a = len(self.widths)
+            with torch.random.fork_rng(devices=[]):
+                self.enc_se = nn.Sequential(nn.Linear(a, max(4, a // 8)), nn.GELU(),
+                                            nn.Linear(max(4, a // 8), a))
+                nn.init.zeros_(self.enc_se[-1].weight)
+                nn.init.zeros_(self.enc_se[-1].bias)
+        # [2026-10-12 추가 끝: SE 게이트 생성] 디코더에는 SE를 추가하지 않음.
+
     def _group(self, index):
         return getattr(self, f"members_{index}"), getattr(self, f"features_{index}")
 
     @classmethod
     def from_checkpoint(cls, checkpoint: dict) -> "Step1Codec":
-        codec = cls(**checkpoint["config"])
+        # [2026-10-12 변경: 체크포인트 호환]
+        # 실험 메타 옵션을 제외하고 enc_se 가중치 유무로 이전 모델의 SE 사용 여부를 판단함.
+        config = {k: v for k, v in checkpoint["config"].items()
+                  if not k.startswith("ablation_")}
+        config.setdefault("se_gate", any(k.startswith("enc_se.") for k in checkpoint["state_dict"]))
+        codec = cls(**config)
         codec.load_state_dict(checkpoint["state_dict"])
         return codec.eval()
 
-    def encode(self, values):
+    # [2026-10-12 추가 시작: 변수 토큰 분리 및 SE 적용]
+    # 기존 토큰 생성 계산을 함수로 분리함. LayerNorm 이후 부호 평균이 상쇄되는 것을
+    # 피하려고 특징 절댓값 평균을 사용하며, 게이트는 변수 identity에 곱하지 않음.
+    def variable_tokens(self, values):
         batch = len(values)
         tokens = values.new_zeros((batch, len(self.widths), self.token_dim))
         for index, encoder in enumerate(self.encoders):
             members, features = self._group(index)
             group_tokens = encoder(values[:, features])            # [B, G, token]
             tokens = tokens.index_copy(1, members, group_tokens.to(tokens.dtype))
+        return tokens
+
+    def gates(self, values):
+        tokens = self.variable_tokens(values)
+        if not self.se_gate:
+            return tokens.new_ones((len(values), len(self.widths)))
+        return 2 * torch.sigmoid(self.enc_se(tokens.float().abs().mean(-1)))
+
+    def encode(self, values):
+        batch = len(values)
+        tokens = self.variable_tokens(values)
+        if self.se_gate:
+            gate = 2 * torch.sigmoid(self.enc_se(tokens.float().abs().mean(-1)))
+            tokens = tokens * gate.to(tokens.dtype)[:, :, None]
+        # [2026-10-12 추가 끝: SE 적용] 아래 변수 임베딩/Attention은 기존 계산을 유지함.
         tokens = tokens + self.variable_embedding
         queries = self.variable_queries.unsqueeze(0).expand(batch, -1, -1)
         slots, _ = self.variable_attention(queries, tokens, tokens, need_weights=False)

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# [2026-10-12 변경 내역]
+# - 파일명/원본 함수는 유지하고, 기본 실행을 현재 논문의 시간 학습에 연결함.
+# - 고정 S/V 디코더를 거친 원본 변수 MSE 100%와 전 위치 공통 채널 통계를 사용함.
+# - 앞 단계 V/S는 고정 재사용하고, 공통 확인 표본/조기 종료 정책을 적용함.
 """
 Step 3: 시간축 압축 — 위치별 시간 TCN 오토인코더 (`step3_model.py`, 양자화 없음).
 
@@ -256,5 +260,20 @@ def main():
     print(f"[done] {out / 'step3_report.json'}", flush=True)
 
 
+# [2026-10-12 변경 시작: 시간 학습 진입점]
+# 이전 잠재공간 손실 학습은 legacy_main으로 보존. 기본 경로는 논문 원자료 복원 손실임.
+legacy_main = main
+
+
+def main():
+    import sys
+    if "--legacy-training" in sys.argv:
+        sys.argv.remove("--legacy-training")
+        return legacy_main()
+    from paper_entry import run_stage
+    return run_stage("T")
+
+
 if __name__ == "__main__":
     main()
+# [2026-10-12 변경 끝: 시간 학습 진입점]

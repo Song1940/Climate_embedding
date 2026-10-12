@@ -1,3 +1,7 @@
+# [2026-10-12 변경 내역]
+# - TCN/잔차 블록/병렬 선형 층 구조는 그대로 유지함.
+# - 전 위치 공통 채널별 정규화(global_per_channel)를 명시적으로 선택 가능하게 함.
+# - 원본 위치별 평균 모드와 이전 체크포인트 로딩도 유지함.
 """
 Step 3 모델: 시간축 압축 — 위치별 시간 TCN 오토인코더 (양자화 없음, float32 저장).
 
@@ -88,11 +92,18 @@ class TemporalTCNCodec(nn.Module):
     """Per-position temporal autoencoder on [P, C, T] sequences; latent [P, L, T/2]."""
 
     def __init__(self, channels: int, mean: np.ndarray, scale: np.ndarray, hidden: int = 256,
-                 latent_channels: int = 256, blocks: int = 2, linear_path: bool = True):
+                 latent_channels: int = 256, blocks: int = 2, linear_path: bool = True,
+                 normalization_mode: str = "per_position"):  # [2026-10-12 추가] 통계 모드 옵션.
         super().__init__()
         self.config = {"channels": int(channels), "hidden": int(hidden),
                        "latent_channels": int(latent_channels), "blocks": int(blocks),
-                       "linear_path": bool(linear_path)}
+                       "linear_path": bool(linear_path), "normalization_mode": normalization_mode}
+        # [2026-10-12 추가 시작: 정규화 모드 선택]
+        # 이전 결과는 위치별 평균을 유지하고, 논문 실행은 공통 채널별 평균을 명시함.
+        if normalization_mode not in ("per_position", "global_per_channel"):
+            raise ValueError(normalization_mode)
+        self.normalization_mode = normalization_mode
+        # [2026-10-12 추가 끝: 정규화 모드 선택]
         c, h, l = channels, hidden, latent_channels
         # μ [P, C] (per-position time mean) and σ [C] are stored with the archive
         self.register_buffer("mean", torch.as_tensor(mean, dtype=torch.float32))
@@ -116,9 +127,15 @@ class TemporalTCNCodec(nn.Module):
 
     def normalize(self, z, positions=slice(None)):
         """z [N, C, T] for the given positions -> anomaly / σ."""
+        # [2026-10-12 추가] 공통 통계 모드에서는 위치 인덱스와 무관하게 채널별로 broadcast함.
+        if self.normalization_mode == "global_per_channel":
+            return (z - self.mean.reshape(1, -1, 1)) / self.scale.reshape(1, -1, 1)
         return (z - self.mean[positions, :, None]) / self.scale[None, :, None]
 
     def denormalize(self, a, positions=slice(None)):
+        # [2026-10-12 추가] 역정규화에서도 동일한 전 위치 공통 채널 통계를 적용함.
+        if self.normalization_mode == "global_per_channel":
+            return a * self.scale.reshape(1, -1, 1) + self.mean.reshape(1, -1, 1)
         return self.mean[positions, :, None] + a * self.scale[None, :, None]
 
     def encode(self, a):
@@ -138,6 +155,10 @@ class TemporalTCNCodec(nn.Module):
     def from_checkpoint(cls, checkpoint: dict):
         state = checkpoint["state_dict"]
         config = {"linear_path": False, **checkpoint["config"]}      # runs before the linear path
+        # [2026-10-12 변경: 이전 체크포인트 호환]
+        # normalization_mode가 없는 기존 CLEAR 체크포인트는 mean의 형태로 모드를 판단함.
+        config.setdefault("normalization_mode", "global_per_channel" if state["mean"].shape[0] == 1
+                          else "per_position")
         model = cls(mean=state["mean"].numpy(), scale=state["scale"].numpy(), **config)
         model.load_state_dict(state)
         return model.eval()
