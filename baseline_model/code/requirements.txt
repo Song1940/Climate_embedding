@@ -1,0 +1,5 @@
+# Keep the existing CUDA-enabled PyTorch installation. Do not replace it with a CPU wheel.
+numpy>=1.24
+netCDF4>=1.6
+scipy>=1.10
+# torch >= 2.1 is required; install the CUDA build suitable for your server separately.
